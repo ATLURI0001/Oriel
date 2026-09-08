@@ -1,0 +1,151 @@
+name: Qdrant Edge Tests
+
+on:
+  push:
+    branches: [ master, dev ]
+  pull_request:
+    branches: [ '**' ]
+
+permissions:
+  contents: read
+
+jobs:
+  edge-test:
+    name: Test Qdrant Edge
+
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # For PRs, only run on ubuntu to save CI time
+        os: >-
+          ${{
+            github.event_name == 'pull_request'
+            && fromJSON('["ubuntu-latest"]')
+            || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]')
+          }}
+
+    steps:
+      # Building the examples links several large statically-linked binaries,
+      # which gets close to the runner's disk limit. Only the fast `rm -rf`
+      # based options are enabled to keep this step under a minute.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          tool-cache: false
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - name: Checkout Qdrant
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave GITHUB_TOKEN in .git/config: later steps build and run
+          # repository-controlled code (Rust/Python examples), which could
+          # otherwise read or exfiltrate the token. This job never pushes.
+          persist-credentials: false
+
+      - name: Install Rust nightly (for fmt)
+        uses: dtolnay/rust-toolchain@0f1b44df7e9cbb178d781a242338dfa5e243ad7f # nightly
+        with:
+          components: rustfmt
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install mold
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1
+
+      - name: Enable mold
+        if: runner.os == 'Linux'
+        run: |
+          mkdir .cargo
+
+          cat >.cargo/config.toml <<-EOF
+          [target.x86_64-unknown-linux-gnu]
+          linker = "clang"
+          rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/bin/mold"]
+          EOF
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install Just
+        uses: ./.github/actions/setup-just
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+
+      - name: Install tools
+        run: |
+          uv tool install ast-grep-cli
+          uv tool install maturin
+
+      - name: Setup Qdrant
+        uses: ./.github/actions/setup-qdrant
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: edge
+          # Only save the cache on dev; feature-branch caches would just get evicted under the 10 GB budget
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+
+      - name: Prepare data files
+        id: rs-prepare-data
+        working-directory: lib/edge
+        run: just prepare-data
+
+      - name: 🦀 Check Rust
+        working-directory: lib/edge
+        run: just rs-check
+
+      - name: 🦀 Test qdrant-edge-ffi (default features)
+        # Run on nightly: the workspace uses unstable features (cfg_select in
+        # lib/common), so stable can't compile it. nightly is already installed
+        # above (for fmt). +nightly also makes doctests use the nightly rustdoc,
+        # avoiding the E0514 toolchain-mismatch seen with a stray stable rustdoc.
+        # Default features (matrix on) — the surface general/non-mobile UniFFI
+        # consumers get.
+        run: cargo +nightly test --locked -p qdrant-edge-ffi
+
+      - name: 🦀 Test qdrant-edge-ffi (mobile surface, no default features)
+        # --no-default-features drops `matrix`, matching what the mobile
+        # Swift/Kotlin bindgen builds. Guards that the crate still compiles and
+        # passes with the O(n^2) search_matrix op excluded from the surface.
+        run: cargo +nightly test --locked -p qdrant-edge-ffi --no-default-features
+
+      - name: 🦀 Test qdrant-edge-ffi (all features)
+        # matrix + staging together, so the feature-gated surface can't bit-rot:
+        # the `staging` coverage-map exhaustiveness arm only compiles under it.
+        run: cargo +nightly test --locked -p qdrant-edge-ffi --all-features
+
+      - name: 🦀 Build Rust examples
+        working-directory: lib/edge
+        run: just rs-examples-build
+
+      - name: 🦀 Run Rust examples
+        working-directory: lib/edge
+        run: just rs-examples
+
+      - name: 🐍 Build Python edge
+        working-directory: lib/edge/python
+        run: just py-build
+
+      - name: 🐍 Run Python examples
+        working-directory: lib/edge
+        run: just py-examples
+
+      - name: Check for uncommitted changes
+        if: always()
+        run: git diff --exit-code

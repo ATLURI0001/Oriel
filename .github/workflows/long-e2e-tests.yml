@@ -1,0 +1,58 @@
+name: Long Integration Tests
+
+on:
+  schedule:
+    - cron: '30 6 * * *'  # At 06:30
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_VERSION: 0.9.17
+
+jobs:
+  long-e2e-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'dev' || github.ref_name }}
+          lfs: true  # Fetch LFS files automatically
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Install uv and Python dependencies
+        run: |
+          curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          uv --project tests lock --check
+          uv --project tests sync
+      - name: Build Qdrant Docker image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          tags: qdrant/qdrant:e2e-tests
+          load: true
+          build-args: |
+            PROFILE=ci
+            FEATURES=data-consistency-check,staging
+      - name: Verify Docker image
+        run: docker images | grep qdrant
+      - name: Run e2e tests
+        run: uv --project tests run pytest -n 4 tests/e2e_tests -v --tb=short --durations=5 -m "longrunning"
+        shell: bash
+        timeout-minutes: 50
+      - name: Upload test logs on failure
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: e2e-test-logs
+          path: |
+            tests/e2e_tests/test_*.log
+            tests/e2e_tests/**/logs/
+          retention-days: 7

@@ -1,0 +1,24 @@
+{
+  "pins": {
+    "fenix": {
+      "type": "Git",
+      "repository": {
+        "type": "GitHub",
+        "owner": "nix-community",
+        "repo": "fenix"
+      },
+      "branch": "main",
+      "submodules": false,
+      "revision": "a260dea172f86c7afa65cec0c6e6a9dd91530017",
+      "url": "https://github.com/nix-community/fenix/archive/a260dea172f86c7afa65cec0c6e6a9dd91530017.tar.gz",
+      "hash": "sha256-dNIhLmwrR7N78amgliAJvFx58RjrhDWorV9B9Kiayeo="
+    },
+    "nixpkgs": {
+      "type": "Channel",
+      "name": "nixpkgs-unstable",
+      "url": "https://releases.nixos.org/nixpkgs/nixpkgs-26.05pre976537.a3db02183b5d/nixexprs.tar.xz",
+      "hash": "sha256-rFByy+vYdvd2IZ7GYibTcc4fuJKj5+g/YkJxqxvt2+o="
+    }
+  },
+  "version": 7
+}
