@@ -15,7 +15,7 @@ Example output:
 import re
 import sys
 import argparse
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 from dataclasses import dataclass
 
 
@@ -51,7 +51,6 @@ from dataclasses import dataclass
 #
 
 
-
 @dataclass
 class MapStats:
     size: int = 0
@@ -76,8 +75,11 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
     current_rss = 0
     current_permissions = ""
     
-    # Compile the regex pattern
-    regex = re.compile(pattern)
+    # Compile the regex pattern safely
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
     
     for line in smaps_content.splitlines():
         # Check if line starts with an address range (new memory map entry)
@@ -94,7 +96,7 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
                 
                 # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
                 if verbose and current_size > 1024:
-                    percentage = (current_rss / current_size) * 100
+                    percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
                     print(f"File: {current_file} ({current_permissions})")
                     print(f"  Size: {current_size} kB")
                     print(f"  RSS: {current_rss} kB")
@@ -109,9 +111,19 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
             # Store full permissions string
             current_permissions = parts[1] if len(parts) > 1 else ""
         elif line.startswith('Size:'):
-            current_size = int(line.split()[1])
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_size = int(parts[1])
+                except ValueError:
+                    current_size = 0
         elif line.startswith('Rss:'):
-            current_rss = int(line.split()[1])
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_rss = int(parts[1])
+                except ValueError:
+                    current_rss = 0
     
     # Don't forget to add the last entry if it matches
     if current_file and regex.search(current_file):
@@ -125,7 +137,7 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
         
         # Log individual file percentage for the last entry if verbose mode is enabled and file is larger than 1MB
         if verbose and current_size > 1024:
-            percentage = (current_rss / current_size) * 100 if current_size > 0 else 0
+            percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
             print(f"File: {current_file} ({current_permissions})")
             print(f"  Size: {current_size} kB")
             print(f"  RSS: {current_rss} kB")
@@ -134,22 +146,30 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
     
     return file_stats
 
-def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False) -> Dict[str, float]:
+def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False, smaps_content: Optional[str] = None) -> Dict[str, float]:
     """
     Calculate the percentage of memory that is cached for files matching the pattern.
     Separates by permission type.
     
     Args:
-        pid: Process ID to analyze
+        pid: Process ID to analyze (> 0)
         pattern: Regular expression pattern to match against file paths
         verbose: Whether to print per-file information
+        smaps_content: Optional pre-loaded smaps string (for testing or remote extraction)
         
     Returns:
         Dictionary mapping permission strings to their cache percentages
     """
+    if pid <= 0 and smaps_content is None:
+        print(f"Error: Invalid PID {pid}. PID must be a positive integer.", file=sys.stderr)
+        return {}
+
     try:
-        with open(f'/proc/{pid}/smaps', 'r') as f:
-            content = f.read()
+        if smaps_content is None:
+            with open(f'/proc/{pid}/smaps', 'r') as f:
+                content = f.read()
+        else:
+            content = smaps_content
         
         file_stats = parse_smaps(content, pattern, verbose)
         
@@ -175,6 +195,9 @@ def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False) ->
         return percentages
     except FileNotFoundError:
         print(f"Error: Could not find /proc/{pid}/smaps", file=sys.stderr)
+        return {}
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         return {}
     except Exception as e:
         print(f"Error processing smaps: {e}", file=sys.stderr)
