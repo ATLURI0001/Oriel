@@ -67,3 +67,21 @@ def test_calculate_cache_percentage_invalid_pid():
 def test_parse_smaps_empty_content():
     stats = parse_smaps("", r".*")
     assert stats == {}
+
+
+def test_parse_smaps_preserves_paths_with_spaces():
+    spaced_smaps = """7de883800000-7de885800000 r--s 00000000 00:33 26610006   /data/my index/vector storage/chunk 1.mmap
+Size:              4096 kB
+Rss:               2048 kB
+"""
+    stats = parse_smaps(spaced_smaps, r".*/my index/.*")
+    key = ("/data/my index/vector storage/chunk 1.mmap", "r--s")
+    assert key in stats
+    assert stats[key].size == 4096
+    assert stats[key].rss == 2048
+
+
+def test_calculate_cache_percentage_missing_proc_graceful():
+    # On Windows or for a non-existent PID, missing /proc/{pid}/smaps returns {} safely
+    res = calculate_cache_percentage(99999999, r".*")
+    assert res == {}
