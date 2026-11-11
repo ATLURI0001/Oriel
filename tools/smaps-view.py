@@ -56,6 +56,35 @@ class MapStats:
     size: int = 0
     rss: int = 0
 
+def _flush_entry(
+    file_stats: Dict[Tuple[str, str], MapStats],
+    regex: re.Pattern,
+    current_file: Optional[str],
+    current_permissions: str,
+    current_size: int,
+    current_rss: int,
+    verbose: bool,
+) -> None:
+    if not (current_file and regex.search(current_file)):
+        return
+    key = (current_file, current_permissions)
+    if key not in file_stats:
+        file_stats[key] = MapStats()
+
+    stats = file_stats[key]
+    stats.size += current_size
+    stats.rss += current_rss
+
+    # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
+    if verbose and current_size > 1024:
+        percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
+        print(f"File: {current_file} ({current_permissions})")
+        print(f"  Size: {current_size} kB")
+        print(f"  RSS: {current_rss} kB")
+        print(f"  Cache percentage: {percentage:.2f}%")
+        print()
+
+
 def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict[Tuple[str, str], MapStats]:
     """
     Parse smaps content and calculate size and RSS for files matching the pattern.
@@ -84,28 +113,19 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
     for line in smaps_content.splitlines():
         # Check if line starts with an address range (new memory map entry)
         if re.match(r'^[0-9a-f]+-[0-9a-f]+', line):
-            # If we have a previous file that matched, add its stats
-            if current_file and regex.search(current_file):
-                key = (current_file, current_permissions)
-                if key not in file_stats:
-                    file_stats[key] = MapStats()
-                
-                stats = file_stats[key]
-                stats.size += current_size
-                stats.rss += current_rss
-                
-                # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
-                if verbose and current_size > 1024:
-                    percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
-                    print(f"File: {current_file} ({current_permissions})")
-                    print(f"  Size: {current_size} kB")
-                    print(f"  RSS: {current_rss} kB")
-                    print(f"  Cache percentage: {percentage:.2f}%")
-                    print()
+            _flush_entry(
+                file_stats,
+                regex,
+                current_file,
+                current_permissions,
+                current_size,
+                current_rss,
+                verbose,
+            )
             
-            # Extract file path and permissions from the line
-            parts = line.split()
-            current_file = parts[-1] if len(parts) > 5 else None
+            # Preserve spaces in mapped paths (e.g. '/data/my index/chunk_1.mmap')
+            parts = line.split(None, 5)
+            current_file = parts[5].strip() if len(parts) > 5 else None
             current_size = 0
             current_rss = 0
             # Store full permissions string
@@ -114,35 +134,26 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
             parts = line.split()
             if len(parts) > 1:
                 try:
-                    current_size = int(parts[1])
+                    current_size = max(0, int(parts[1]))
                 except ValueError:
                     current_size = 0
         elif line.startswith('Rss:'):
             parts = line.split()
             if len(parts) > 1:
                 try:
-                    current_rss = int(parts[1])
+                    current_rss = max(0, int(parts[1]))
                 except ValueError:
                     current_rss = 0
     
-    # Don't forget to add the last entry if it matches
-    if current_file and regex.search(current_file):
-        key = (current_file, current_permissions)
-        if key not in file_stats:
-            file_stats[key] = MapStats()
-        
-        stats = file_stats[key]
-        stats.size += current_size
-        stats.rss += current_rss
-        
-        # Log individual file percentage for the last entry if verbose mode is enabled and file is larger than 1MB
-        if verbose and current_size > 1024:
-            percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
-            print(f"File: {current_file} ({current_permissions})")
-            print(f"  Size: {current_size} kB")
-            print(f"  RSS: {current_rss} kB")
-            print(f"  Cache percentage: {percentage:.2f}%")
-            print()
+    _flush_entry(
+        file_stats,
+        regex,
+        current_file,
+        current_permissions,
+        current_size,
+        current_rss,
+        verbose,
+    )
     
     return file_stats
 
@@ -166,7 +177,8 @@ def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False, sm
 
     try:
         if smaps_content is None:
-            with open(f'/proc/{pid}/smaps', 'r') as f:
+            smaps_path = f'/proc/{pid}/smaps'
+            with open(smaps_path, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
         else:
             content = smaps_content
@@ -194,13 +206,16 @@ def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False, sm
         
         return percentages
     except FileNotFoundError:
-        print(f"Error: Could not find /proc/{pid}/smaps", file=sys.stderr)
+        print(f"Error: Could not find /proc/{pid}/smaps (Linux procfs required)", file=sys.stderr)
+        return {}
+    except PermissionError:
+        print(f"Error: Permission denied reading /proc/{pid}/smaps", file=sys.stderr)
         return {}
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return {}
-    except Exception as e:
-        print(f"Error processing smaps: {e}", file=sys.stderr)
+    except OSError as e:
+        print(f"Error reading /proc/{pid}/smaps: {e}", file=sys.stderr)
         return {}
 
 if __name__ == '__main__':
