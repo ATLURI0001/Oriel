@@ -60,20 +60,29 @@ class Lsp:
             line = self.proc.stdout.readline()
             if not line:
                 sys.exit("rust-analyzer exited unexpectedly")
-            if line.startswith(b"Content-Length:"):
-                length = int(line.split(b":")[1])
+            if line.lower().startswith(b"content-length:"):
+                try:
+                    length = int(line.split(b":", 1)[1].strip())
+                except ValueError:
+                    sys.exit(f"invalid Content-Length header: {line!r}")
             if line == b"\r\n":
                 break
-        return json.loads(self.proc.stdout.read(length))
+        if length is None or length <= 0:
+            sys.exit(f"missing or invalid Content-Length in LSP message: {length!r}")
+        payload = self.proc.stdout.read(length)
+        if not payload or len(payload) < length:
+            sys.exit("rust-analyzer exited while reading LSP message body")
+        return json.loads(payload)
 
     def handle(self, msg):
         """React to server-initiated traffic; return True if it was consumed."""
         if msg.get("method") == "experimental/serverStatus":
-            self.quiescent = msg["params"].get("quiescent", False)
+            self.quiescent = msg.get("params", {}).get("quiescent", False)
             return True
         if "id" in msg and "method" in msg:  # server request: give an empty answer
             if msg["method"] == "workspace/configuration":
-                result = [None] * len(msg["params"]["items"])
+                items = msg.get("params", {}).get("items", [])
+                result = [None] * len(items)
             else:
                 result = None
             self.send({"jsonrpc": "2.0", "id": msg["id"], "result": result})
@@ -152,10 +161,19 @@ def find_function(target):
 
 
 def position_in_file(spec):
-    path, lineno = spec.rsplit(":", 1)
+    if ":" not in spec:
+        sys.exit(f"expected <path>:<line>, got {spec!r}")
+    path, lineno_str = spec.rsplit(":", 1)
     path = os.path.abspath(path)
-    lineno = int(lineno) - 1
-    line = open(path).read().splitlines()[lineno]
+    try:
+        lineno = int(lineno_str) - 1
+    except ValueError:
+        sys.exit(f"invalid line number in {spec!r}")
+    with open(path, encoding="utf-8", errors="replace") as f:
+        file_lines = f.read().splitlines()
+    if lineno < 0 or lineno >= len(file_lines):
+        sys.exit(f"line {lineno + 1} out of range for {path} ({len(file_lines)} lines)")
+    line = file_lines[lineno]
     m = re.search(r"\bfn\s+(\w+)", line)
     if not m:
         sys.exit(f"no `fn` on line {lineno + 1} of {path}")
@@ -165,7 +183,9 @@ def position_in_file(spec):
 def keep(path):
     # cfg(test) code is already invisible (cfg.setTest=false); what remains to
     # exclude are the directory-defined cargo targets and generated code.
-    return path.startswith(ROOT) and not any(p in path for p in EXCLUDE_PATH_PARTS)
+    norm_path = os.path.abspath(path).replace("\\", "/")
+    norm_root = os.path.abspath(ROOT).replace("\\", "/")
+    return norm_path.startswith(norm_root) and not any(p in norm_path for p in EXCLUDE_PATH_PARTS)
 
 
 def norm_locations(resp):
@@ -176,9 +196,13 @@ def norm_locations(resp):
         resp = [resp]
     out = []
     for loc in resp:
+        if not isinstance(loc, dict):
+            continue
         if "targetUri" in loc:
-            out.append((loc["targetUri"], loc["targetSelectionRange"]["start"]))
-        else:
+            sel = loc.get("targetSelectionRange") or loc.get("targetRange")
+            if isinstance(sel, dict) and "start" in sel:
+                out.append((loc["targetUri"], sel["start"]))
+        elif "uri" in loc and isinstance(loc.get("range"), dict) and "start" in loc["range"]:
             out.append((loc["uri"], loc["range"]["start"]))
     return out
 
@@ -208,7 +232,8 @@ class Collector:
     def lines(self, path):
         if path not in self.file_cache:
             try:
-                self.file_cache[path] = open(path).read().splitlines()
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    self.file_cache[path] = f.read().splitlines()
             except OSError:
                 self.file_cache[path] = []
         return self.file_cache[path]
