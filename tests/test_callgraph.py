@@ -80,3 +80,25 @@ def test_position_in_file_utf8_and_bounds(tmp_path):
         callgraph.position_in_file(f"{rs}:99")
     with pytest.raises(SystemExit, match="expected <path>:<line>"):
         callgraph.position_in_file("no_colon")
+
+
+def test_uri_to_path_cross_platform_and_encoded():
+    import os
+    # Linux-style URI
+    p_linux = callgraph.uri_to_path("file:///home/user/project/src/lib.rs")
+    assert "/home/user/project/src/lib.rs" in p_linux.replace("\\", "/")
+
+    # Windows-style URI
+    p_win = callgraph.uri_to_path("file:///C:/Users/user/project/src/lib.rs")
+    norm_win = p_win.replace("/", "\\")
+    assert norm_win.lower().endswith("c:\\users\\user\\project\\src\\lib.rs")
+
+    # URL encoded URI
+    p_enc = callgraph.uri_to_path("file:///C%3A/Users/user%20name/project/src/lib.rs")
+    norm_enc = p_enc.replace("/", "\\")
+    assert "user name" in norm_enc
+
+    # Plain paths or invalid URIs
+    assert callgraph.uri_to_path("plain/path.rs") == os.path.normpath("plain/path.rs")
+    assert callgraph.uri_to_path("") == ""
+    assert callgraph.uri_to_path(None) == ""
