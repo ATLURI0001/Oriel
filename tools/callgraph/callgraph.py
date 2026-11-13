@@ -23,6 +23,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 
 TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(TOOL_DIR))
@@ -32,6 +33,20 @@ PALETTE = [
     "#dbeafe", "#dcfce7", "#fef3c7", "#fce7f3", "#e0e7ff",
     "#ccfbf1", "#fee2e2", "#f3e8ff", "#ede9d5", "#f1f5f9",
 ]
+
+
+def uri_to_path(uri: str) -> str:
+    """Convert an LSP file URI (file://...) to a normalized filesystem path."""
+    if not uri or not isinstance(uri, str):
+        return ""
+    if not uri.startswith("file://"):
+        return os.path.normpath(uri)
+    raw = uri[7:]
+    path = urllib.parse.unquote(raw)
+    # On Windows, file:///C:/path starts with /C:/ or /c:/
+    if len(path) >= 3 and path[0] == "/" and path[1].isalpha() and path[2] == ":":
+        path = path[1:]
+    return os.path.normpath(path)
 
 
 def log(msg):
@@ -299,7 +314,7 @@ class Collector:
                 peer = call[peer_key]
                 if peer["kind"] not in (6, 12):  # 6 = Method, 12 = Function
                     continue
-                if not keep(peer["uri"].removeprefix("file://")):
+                if not keep(uri_to_path(peer["uri"])):
                     continue
                 pid = self.node_id(peer)
                 edge = (pid, iid, "call") if callers else (iid, pid, "call")
@@ -307,7 +322,7 @@ class Collector:
                 in_view.add(pid)
                 queue.append((peer, d + 1))
             for decl, impl, enqueue in self.bridge(item, callers, iid == root_id):
-                if not (keep(decl["uri"].removeprefix("file://")) and keep(impl["uri"].removeprefix("file://"))):
+                if not (keep(uri_to_path(decl["uri"])) and keep(uri_to_path(impl["uri"]))):
                     continue
                 edges.setdefault((self.node_id(decl), self.node_id(impl), "impl"), [])
                 in_view.update((self.node_id(decl), self.node_id(impl)))
@@ -319,7 +334,7 @@ class Collector:
     def enrich(self, node_id):
         node = self.nodes[node_id]
         item = node["item"]
-        path = item["uri"].removeprefix("file://")
+        path = uri_to_path(item["uri"])
         rel = os.path.relpath(path, ROOT)
         start = item["range"]["start"]["line"]
         end = item["range"]["end"]["line"]
@@ -346,7 +361,7 @@ class Collector:
         )
 
     def call_sites(self, caller_id, ranges):
-        path = self.nodes[caller_id]["item"]["uri"].removeprefix("file://")
+        path = uri_to_path(self.nodes[caller_id]["item"]["uri"])
         lines = self.lines(path)
         sites, seen = [], set()
         for rng in ranges:
