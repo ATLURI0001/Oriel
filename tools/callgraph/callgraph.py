@@ -35,6 +35,16 @@ PALETTE = [
 ]
 
 
+def safe_relpath(path: str, start: str = ROOT) -> str:
+    """Safely compute relative path, handling cross-drive paths or errors on Windows."""
+    if not path:
+        return ""
+    try:
+        return os.path.relpath(path, start)
+    except (ValueError, OSError):
+        return path
+
+
 def uri_to_path(uri: str) -> str:
     """Convert an LSP file URI (file://...) to a normalized filesystem path."""
     if not uri or not isinstance(uri, str):
@@ -158,9 +168,10 @@ def find_function(target):
     hits = []
     for line in out:
         path, lineno, text = line.split(":", 2)
-        if any(p in "/" + path + "/" for p in EXCLUDE_PATH_PARTS):
+        norm_p = path.replace("\\", "/")
+        if any(p in "/" + norm_p + "/" for p in EXCLUDE_PATH_PARTS):
             continue
-        score = sum(1 for h in hints if h in path.split("/"))
+        score = sum(1 for h in hints if h in norm_p.split("/"))
         hits.append((score, path, int(lineno), text))
     if not hits:
         sys.exit(f"no definition of `fn {name}` found")
@@ -335,7 +346,7 @@ class Collector:
         node = self.nodes[node_id]
         item = node["item"]
         path = uri_to_path(item["uri"])
-        rel = os.path.relpath(path, ROOT)
+        rel = safe_relpath(path, ROOT)
         start = item["range"]["start"]["line"]
         end = item["range"]["end"]["line"]
         lines = self.lines(path)[start : end + 1]
@@ -379,14 +390,16 @@ class Collector:
         return sites
 
 
-def crate_of(rel):
-    if "/src/" in rel:
-        return rel.split("/src/")[0].split("/")[-1]
+def crate_of(rel: str) -> str:
+    norm = rel.replace("\\", "/")
+    if "/src/" in norm:
+        return norm.split("/src/")[0].split("/")[-1]
     return "qdrant"
 
 
-def short_path(rel):
-    tail = rel.split("/src/")[-1]
+def short_path(rel: str) -> str:
+    norm = rel.replace("\\", "/")
+    tail = norm.split("/src/")[-1]
     parts = tail.split("/")
     return "/".join(parts[-2:]) if len(parts) > 1 else tail
 
