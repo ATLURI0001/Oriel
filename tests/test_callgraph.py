@@ -102,3 +102,20 @@ def test_uri_to_path_cross_platform_and_encoded():
     assert callgraph.uri_to_path("plain/path.rs") == os.path.normpath("plain/path.rs")
     assert callgraph.uri_to_path("") == ""
     assert callgraph.uri_to_path(None) == ""
+
+
+def test_safe_relpath_and_cross_platform_crate_extraction():
+    # safe_relpath handles empty or cross-drive errors
+    assert callgraph.safe_relpath("") == ""
+    assert callgraph.safe_relpath("relative/path/file.rs") != ""
+
+    # crate_of and short_path normalize Windows backslashes
+    win_rel = "lib\\segment\\src\\entry.rs"
+    unix_rel = "lib/segment/src/entry.rs"
+    assert callgraph.crate_of(win_rel) == "segment"
+    assert callgraph.crate_of(unix_rel) == "segment"
+    assert callgraph.crate_of("root/other.rs") == "qdrant"
+
+    win_short = "lib\\segment\\src\\data\\index\\builder.rs"
+    assert callgraph.short_path(win_short) == "index/builder.rs"
+    assert callgraph.short_path("lib/src/main.rs") == "main.rs"
