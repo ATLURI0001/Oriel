@@ -55,6 +55,7 @@ from dataclasses import dataclass
 class MapStats:
     size: int = 0
     rss: int = 0
+    pss: int = 0
 
 def _flush_entry(
     file_stats: Dict[Tuple[str, str], MapStats],
@@ -63,6 +64,7 @@ def _flush_entry(
     current_permissions: str,
     current_size: int,
     current_rss: int,
+    current_pss: int,
     verbose: bool,
 ) -> None:
     if not (current_file and regex.search(current_file)):
@@ -74,18 +76,21 @@ def _flush_entry(
     stats = file_stats[key]
     stats.size += current_size
     stats.rss += current_rss
+    stats.pss += current_pss
 
     # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
     if verbose and current_size > 1024:
         percentage = (current_rss / current_size) * 100 if current_size > 0 else 0.0
+        pss_pct = (current_pss / current_size) * 100 if current_size > 0 else 0.0
         print(f"File: {current_file} ({current_permissions})")
         print(f"  Size: {current_size} kB")
         print(f"  RSS: {current_rss} kB")
-        print(f"  Cache percentage: {percentage:.2f}%")
+        print(f"  PSS: {current_pss} kB")
+        print(f"  Cache percentage: {percentage:.2f}% (PSS: {pss_pct:.2f}%)")
         print()
 
 
-def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict[Tuple[str, str], MapStats]:
+def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) -> Dict[Tuple[str, str], MapStats]:
     """
     Parse smaps content and calculate size and RSS for files matching the pattern.
     Optionally logs individual file percentages for files larger than 1MB.
@@ -102,13 +107,15 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
     current_file = None
     current_size = 0
     current_rss = 0
+    current_pss = 0
     current_permissions = ""
     
     # Compile the regex pattern safely
+    pat = pattern if pattern is not None and pattern != "" else ".*"
     try:
-        regex = re.compile(pattern)
+        regex = re.compile(pat)
     except re.error as e:
-        raise ValueError(f"Invalid regex pattern '{pattern}': {e}") from e
+        raise ValueError(f"Invalid regex pattern '{pat}': {e}") from e
     
     for line in smaps_content.splitlines():
         # Check if line starts with an address range (new memory map entry)
@@ -120,6 +127,7 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
                 current_permissions,
                 current_size,
                 current_rss,
+                current_pss,
                 verbose,
             )
             
@@ -128,6 +136,7 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
             current_file = parts[5].strip() if len(parts) > 5 else None
             current_size = 0
             current_rss = 0
+            current_pss = 0
             # Store full permissions string
             current_permissions = parts[1] if len(parts) > 1 else ""
         elif line.startswith('Size:'):
@@ -144,6 +153,13 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
                     current_rss = max(0, int(parts[1]))
                 except ValueError:
                     current_rss = 0
+        elif line.startswith('Pss:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_pss = max(0, int(parts[1]))
+                except ValueError:
+                    current_pss = 0
     
     _flush_entry(
         file_stats,
@@ -152,6 +168,7 @@ def parse_smaps(smaps_content: str, pattern: str, verbose: bool = False) -> Dict
         current_permissions,
         current_size,
         current_rss,
+        current_pss,
         verbose,
     )
     
@@ -216,6 +233,50 @@ def calculate_cache_percentage(pid: int, pattern: str, verbose: bool = False, sm
         return {}
     except OSError as e:
         print(f"Error reading /proc/{pid}/smaps: {e}", file=sys.stderr)
+        return {}
+
+
+def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_content: Optional[str] = None) -> Dict[str, dict]:
+    """
+    Summarize memory maps by permission, aggregating size, RSS, PSS, and cache percentages.
+    """
+    if pid <= 0 and smaps_content is None:
+        return {}
+
+    try:
+        if smaps_content is None:
+            smaps_path = f'/proc/{pid}/smaps'
+            with open(smaps_path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+        else:
+            content = smaps_content
+
+        file_stats = parse_smaps(content, pattern, verbose)
+        if not file_stats:
+            return {}
+
+        agg: Dict[str, Dict[str, int]] = {}
+        for (_, perms), stats in file_stats.items():
+            if perms not in agg:
+                agg[perms] = {"size": 0, "rss": 0, "pss": 0}
+            agg[perms]["size"] += stats.size
+            agg[perms]["rss"] += stats.rss
+            agg[perms]["pss"] += stats.pss
+
+        summary = {}
+        for perms, totals in agg.items():
+            sz = totals["size"]
+            rss = totals["rss"]
+            pss = totals["pss"]
+            summary[perms] = {
+                "size_kb": sz,
+                "rss_kb": rss,
+                "pss_kb": pss,
+                "cache_pct": (rss / sz * 100.0) if sz > 0 else 0.0,
+                "pss_pct": (pss / sz * 100.0) if sz > 0 else 0.0,
+            }
+        return summary
+    except Exception:
         return {}
 
 if __name__ == '__main__':

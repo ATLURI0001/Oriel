@@ -9,6 +9,7 @@ sys.path.insert(0, str(tools_dir))
 smaps_view = __import__("smaps-view")
 parse_smaps = smaps_view.parse_smaps
 calculate_cache_percentage = smaps_view.calculate_cache_percentage
+summarize_smaps = smaps_view.summarize_smaps
 
 
 SAMPLE_SMAPS = """7de883800000-7de885800000 r--s 00000000 00:33 26610006                   /qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap
@@ -85,3 +86,25 @@ def test_calculate_cache_percentage_missing_proc_graceful():
     # On Windows or for a non-existent PID, missing /proc/{pid}/smaps returns {} safely
     res = calculate_cache_percentage(99999999, r".*")
     assert res == {}
+
+
+def test_parse_smaps_pss_and_summarize():
+    stats = parse_smaps(SAMPLE_SMAPS, r".*/benchmark/.*")
+    key1 = ("/qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap", "r--s")
+    assert stats[key1].pss == 8192
+
+    summary = summarize_smaps(1, r".*/benchmark/.*", smaps_content=SAMPLE_SMAPS)
+    assert "r--s" in summary
+    assert summary["r--s"]["size_kb"] == 32768
+    assert summary["r--s"]["rss_kb"] == 8192
+    assert summary["r--s"]["pss_kb"] == 8192
+    assert abs(summary["r--s"]["pss_pct"] - 25.0) < 0.01
+
+
+def test_parse_smaps_empty_or_none_pattern_defaults_wildcard():
+    stats_none = parse_smaps(SAMPLE_SMAPS, None)
+    assert len(stats_none) == 3
+    stats_empty = parse_smaps(SAMPLE_SMAPS, "")
+    assert len(stats_empty) == 3
+    summary_empty = summarize_smaps(1, "", smaps_content=SAMPLE_SMAPS)
+    assert "r-xp" in summary_empty
