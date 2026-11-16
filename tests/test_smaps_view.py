@@ -10,6 +10,7 @@ smaps_view = __import__("smaps-view")
 parse_smaps = smaps_view.parse_smaps
 calculate_cache_percentage = smaps_view.calculate_cache_percentage
 summarize_smaps = smaps_view.summarize_smaps
+format_memory_summary = smaps_view.format_memory_summary
 
 
 SAMPLE_SMAPS = """7de883800000-7de885800000 r--s 00000000 00:33 26610006                   /qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap
@@ -108,3 +109,39 @@ def test_parse_smaps_empty_or_none_pattern_defaults_wildcard():
     assert len(stats_empty) == 3
     summary_empty = summarize_smaps(1, "", smaps_content=SAMPLE_SMAPS)
     assert "r-xp" in summary_empty
+
+
+def test_parse_smaps_shared_private_and_format_summary():
+    detailed_smaps = """7de883800000-7de885800000 r--s 00000000 00:33 26610006   /data/chunk.mmap
+Size:              8192 kB
+Rss:               4096 kB
+Pss:               2048 kB
+Shared_Clean:      1024 kB
+Shared_Dirty:       512 kB
+Private_Clean:     2048 kB
+Private_Dirty:      512 kB
+"""
+    stats = parse_smaps(detailed_smaps, r".*")
+    key = ("/data/chunk.mmap", "r--s")
+    assert key in stats
+    s = stats[key]
+    assert s.shared_clean == 1024
+    assert s.shared_dirty == 512
+    assert s.shared == 1536
+    assert s.private_clean == 2048
+    assert s.private_dirty == 512
+    assert s.private == 2560
+
+    summary = summarize_smaps(1, r".*", smaps_content=detailed_smaps)
+    assert summary["r--s"]["shared_kb"] == 1536
+    assert summary["r--s"]["private_kb"] == 2560
+
+    formatted = format_memory_summary(summary)
+    assert "r--s" in formatted
+    assert "8192" in formatted
+    assert "1536" in formatted
+    assert "2560" in formatted
+
+    empty_fmt = format_memory_summary({})
+    assert "No memory mapping data available" in empty_fmt
+
