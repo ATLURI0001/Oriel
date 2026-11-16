@@ -60,6 +60,8 @@ class MapStats:
     shared_dirty: int = 0
     private_clean: int = 0
     private_dirty: int = 0
+    swap: int = 0
+    swap_pss: int = 0
 
     @property
     def shared(self) -> int:
@@ -81,6 +83,8 @@ def _flush_entry(
     current_sd: int,
     current_pc: int,
     current_pd: int,
+    current_swap: int,
+    current_swap_pss: int,
     verbose: bool,
 ) -> None:
     if not (current_file and regex.search(current_file)):
@@ -97,6 +101,8 @@ def _flush_entry(
     stats.shared_dirty += current_sd
     stats.private_clean += current_pc
     stats.private_dirty += current_pd
+    stats.swap += current_swap
+    stats.swap_pss += current_swap_pss
 
     # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
     if verbose and current_size > 1024:
@@ -132,6 +138,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
     current_sd = 0
     current_pc = 0
     current_pd = 0
+    current_swap = 0
+    current_swap_pss = 0
     current_permissions = ""
     
     # Compile the regex pattern safely
@@ -156,6 +164,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                 current_sd,
                 current_pc,
                 current_pd,
+                current_swap,
+                current_swap_pss,
                 verbose,
             )
             
@@ -169,6 +179,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
             current_sd = 0
             current_pc = 0
             current_pd = 0
+            current_swap = 0
+            current_swap_pss = 0
             # Store full permissions string
             current_permissions = parts[1] if len(parts) > 1 else ""
         elif line.startswith('Size:'):
@@ -220,6 +232,20 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                     current_pd = max(0, int(parts[1]))
                 except ValueError:
                     current_pd = 0
+        elif line.startswith('Swap:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_swap = max(0, int(parts[1]))
+                except ValueError:
+                    current_swap = 0
+        elif line.startswith('SwapPss:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_swap_pss = max(0, int(parts[1]))
+                except ValueError:
+                    current_swap_pss = 0
     
     _flush_entry(
         file_stats,
@@ -233,6 +259,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
         current_sd,
         current_pc,
         current_pd,
+        current_swap,
+        current_swap_pss,
         verbose,
     )
     
@@ -322,12 +350,14 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
         agg: Dict[str, Dict[str, int]] = {}
         for (_, perms), stats in file_stats.items():
             if perms not in agg:
-                agg[perms] = {"size": 0, "rss": 0, "pss": 0, "shared": 0, "private": 0}
+                agg[perms] = {"size": 0, "rss": 0, "pss": 0, "shared": 0, "private": 0, "swap": 0, "swap_pss": 0}
             agg[perms]["size"] += stats.size
             agg[perms]["rss"] += stats.rss
             agg[perms]["pss"] += stats.pss
             agg[perms]["shared"] += stats.shared
             agg[perms]["private"] += stats.private
+            agg[perms]["swap"] += stats.swap
+            agg[perms]["swap_pss"] += stats.swap_pss
 
         summary = {}
         for perms, totals in agg.items():
@@ -336,18 +366,56 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
             pss = totals["pss"]
             shared = totals["shared"]
             private = totals["private"]
+            swap = totals["swap"]
+            swap_pss = totals["swap_pss"]
             summary[perms] = {
                 "size_kb": sz,
                 "rss_kb": rss,
                 "pss_kb": pss,
                 "shared_kb": shared,
                 "private_kb": private,
+                "swap_kb": swap,
+                "swap_pss_kb": swap_pss,
                 "cache_pct": (rss / sz * 100.0) if sz > 0 else 0.0,
                 "pss_pct": (pss / sz * 100.0) if sz > 0 else 0.0,
             }
         return summary
     except Exception:
         return {}
+
+
+def calculate_summary_totals(summary: Dict[str, dict]) -> dict:
+    """Calculate grand totals across all permission segments."""
+    if not isinstance(summary, dict) or not summary:
+        return {
+            "total_size_kb": 0,
+            "total_rss_kb": 0,
+            "total_pss_kb": 0,
+            "total_shared_kb": 0,
+            "total_private_kb": 0,
+            "total_swap_kb": 0,
+            "total_swap_pss_kb": 0,
+            "overall_cache_pct": 0.0,
+        }
+    tot_sz = sum(d.get("size_kb", 0) for d in summary.values())
+    tot_rss = sum(d.get("rss_kb", 0) for d in summary.values())
+    tot_pss = sum(d.get("pss_kb", 0) for d in summary.values())
+    tot_shared = sum(d.get("shared_kb", 0) for d in summary.values())
+    tot_private = sum(d.get("private_kb", 0) for d in summary.values())
+    tot_swap = sum(d.get("swap_kb", 0) for d in summary.values())
+    tot_swap_pss = sum(d.get("swap_pss_kb", 0) for d in summary.values())
+    cache_pct = (tot_rss / tot_sz * 100.0) if tot_sz > 0 else 0.0
+
+    return {
+        "total_size_kb": tot_sz,
+        "total_rss_kb": tot_rss,
+        "total_pss_kb": tot_pss,
+        "total_shared_kb": tot_shared,
+        "total_private_kb": tot_private,
+        "total_swap_kb": tot_swap,
+        "total_swap_pss_kb": tot_swap_pss,
+        "overall_cache_pct": round(cache_pct, 2),
+    }
 
 
 def format_memory_summary(summary: Dict[str, dict]) -> str:

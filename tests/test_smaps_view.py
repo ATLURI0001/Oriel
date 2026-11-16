@@ -11,6 +11,7 @@ parse_smaps = smaps_view.parse_smaps
 calculate_cache_percentage = smaps_view.calculate_cache_percentage
 summarize_smaps = smaps_view.summarize_smaps
 format_memory_summary = smaps_view.format_memory_summary
+calculate_summary_totals = smaps_view.calculate_summary_totals
 
 
 SAMPLE_SMAPS = """7de883800000-7de885800000 r--s 00000000 00:33 26610006                   /qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap
@@ -144,4 +145,42 @@ Private_Dirty:      512 kB
 
     empty_fmt = format_memory_summary({})
     assert "No memory mapping data available" in empty_fmt
+
+
+def test_parse_smaps_swap_and_summary_totals():
+    swap_smaps = """7de883800000-7de885800000 rw-p 00000000 00:33 26610006   /var/log/app.log
+Size:              4096 kB
+Rss:               2048 kB
+Pss:               1024 kB
+Shared_Clean:       512 kB
+Shared_Dirty:         0 kB
+Private_Clean:     1024 kB
+Private_Dirty:      512 kB
+Swap:               256 kB
+SwapPss:            128 kB
+"""
+    stats = parse_smaps(swap_smaps, r".*")
+    key = ("/var/log/app.log", "rw-p")
+    assert key in stats
+    s = stats[key]
+    assert s.swap == 256
+    assert s.swap_pss == 128
+
+    summary = summarize_smaps(1, r".*", smaps_content=swap_smaps)
+    assert summary["rw-p"]["swap_kb"] == 256
+    assert summary["rw-p"]["swap_pss_kb"] == 128
+
+    totals = calculate_summary_totals(summary)
+    assert totals["total_size_kb"] == 4096
+    assert totals["total_rss_kb"] == 2048
+    assert totals["total_pss_kb"] == 1024
+    assert totals["total_shared_kb"] == 512
+    assert totals["total_private_kb"] == 1536
+    assert totals["total_swap_kb"] == 256
+    assert totals["total_swap_pss_kb"] == 128
+    assert totals["overall_cache_pct"] == 50.0
+
+    empty_totals = calculate_summary_totals({})
+    assert empty_totals["total_size_kb"] == 0
+    assert empty_totals["overall_cache_pct"] == 0.0
 
