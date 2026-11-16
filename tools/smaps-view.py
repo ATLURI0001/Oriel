@@ -56,6 +56,18 @@ class MapStats:
     size: int = 0
     rss: int = 0
     pss: int = 0
+    shared_clean: int = 0
+    shared_dirty: int = 0
+    private_clean: int = 0
+    private_dirty: int = 0
+
+    @property
+    def shared(self) -> int:
+        return self.shared_clean + self.shared_dirty
+
+    @property
+    def private(self) -> int:
+        return self.private_clean + self.private_dirty
 
 def _flush_entry(
     file_stats: Dict[Tuple[str, str], MapStats],
@@ -65,6 +77,10 @@ def _flush_entry(
     current_size: int,
     current_rss: int,
     current_pss: int,
+    current_sc: int,
+    current_sd: int,
+    current_pc: int,
+    current_pd: int,
     verbose: bool,
 ) -> None:
     if not (current_file and regex.search(current_file)):
@@ -77,6 +93,10 @@ def _flush_entry(
     stats.size += current_size
     stats.rss += current_rss
     stats.pss += current_pss
+    stats.shared_clean += current_sc
+    stats.shared_dirty += current_sd
+    stats.private_clean += current_pc
+    stats.private_dirty += current_pd
 
     # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
     if verbose and current_size > 1024:
@@ -108,6 +128,10 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
     current_size = 0
     current_rss = 0
     current_pss = 0
+    current_sc = 0
+    current_sd = 0
+    current_pc = 0
+    current_pd = 0
     current_permissions = ""
     
     # Compile the regex pattern safely
@@ -128,6 +152,10 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                 current_size,
                 current_rss,
                 current_pss,
+                current_sc,
+                current_sd,
+                current_pc,
+                current_pd,
                 verbose,
             )
             
@@ -137,6 +165,10 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
             current_size = 0
             current_rss = 0
             current_pss = 0
+            current_sc = 0
+            current_sd = 0
+            current_pc = 0
+            current_pd = 0
             # Store full permissions string
             current_permissions = parts[1] if len(parts) > 1 else ""
         elif line.startswith('Size:'):
@@ -160,6 +192,34 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                     current_pss = max(0, int(parts[1]))
                 except ValueError:
                     current_pss = 0
+        elif line.startswith('Shared_Clean:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_sc = max(0, int(parts[1]))
+                except ValueError:
+                    current_sc = 0
+        elif line.startswith('Shared_Dirty:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_sd = max(0, int(parts[1]))
+                except ValueError:
+                    current_sd = 0
+        elif line.startswith('Private_Clean:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_pc = max(0, int(parts[1]))
+                except ValueError:
+                    current_pc = 0
+        elif line.startswith('Private_Dirty:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_pd = max(0, int(parts[1]))
+                except ValueError:
+                    current_pd = 0
     
     _flush_entry(
         file_stats,
@@ -169,6 +229,10 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
         current_size,
         current_rss,
         current_pss,
+        current_sc,
+        current_sd,
+        current_pc,
+        current_pd,
         verbose,
     )
     
@@ -258,26 +322,50 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
         agg: Dict[str, Dict[str, int]] = {}
         for (_, perms), stats in file_stats.items():
             if perms not in agg:
-                agg[perms] = {"size": 0, "rss": 0, "pss": 0}
+                agg[perms] = {"size": 0, "rss": 0, "pss": 0, "shared": 0, "private": 0}
             agg[perms]["size"] += stats.size
             agg[perms]["rss"] += stats.rss
             agg[perms]["pss"] += stats.pss
+            agg[perms]["shared"] += stats.shared
+            agg[perms]["private"] += stats.private
 
         summary = {}
         for perms, totals in agg.items():
             sz = totals["size"]
             rss = totals["rss"]
             pss = totals["pss"]
+            shared = totals["shared"]
+            private = totals["private"]
             summary[perms] = {
                 "size_kb": sz,
                 "rss_kb": rss,
                 "pss_kb": pss,
+                "shared_kb": shared,
+                "private_kb": private,
                 "cache_pct": (rss / sz * 100.0) if sz > 0 else 0.0,
                 "pss_pct": (pss / sz * 100.0) if sz > 0 else 0.0,
             }
         return summary
     except Exception:
         return {}
+
+
+def format_memory_summary(summary: Dict[str, dict]) -> str:
+    """Format memory map summary into clean human-readable diagnostic text."""
+    if not isinstance(summary, dict) or not summary:
+        return "No memory mapping data available."
+    lines = ["Permissions | Size (kB) | RSS (kB) | PSS (kB) | Shared (kB) | Private (kB) | Cache %"]
+    lines.append("-" * 75)
+    for perms, data in sorted(summary.items()):
+        sz = data.get("size_kb", 0)
+        rss = data.get("rss_kb", 0)
+        pss = data.get("pss_kb", 0)
+        shared = data.get("shared_kb", 0)
+        private = data.get("private_kb", 0)
+        pct = data.get("cache_pct", 0.0)
+        lines.append(f"{perms:<11} | {sz:>9} | {rss:>8} | {pss:>8} | {shared:>11} | {private:>12} | {pct:>6.2f}%")
+    return "\n".join(lines)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Analyze memory maps and calculate cache percentages')
