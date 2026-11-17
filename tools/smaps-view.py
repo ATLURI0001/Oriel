@@ -62,6 +62,8 @@ class MapStats:
     private_dirty: int = 0
     swap: int = 0
     swap_pss: int = 0
+    anonymous: int = 0
+    anon_huge_pages: int = 0
 
     @property
     def shared(self) -> int:
@@ -85,6 +87,8 @@ def _flush_entry(
     current_pd: int,
     current_swap: int,
     current_swap_pss: int,
+    current_anon: int,
+    current_ahp: int,
     verbose: bool,
 ) -> None:
     if not (current_file and regex.search(current_file)):
@@ -103,6 +107,8 @@ def _flush_entry(
     stats.private_dirty += current_pd
     stats.swap += current_swap
     stats.swap_pss += current_swap_pss
+    stats.anonymous += current_anon
+    stats.anon_huge_pages += current_ahp
 
     # Log individual file percentage if verbose mode is enabled and file is larger than 1MB
     if verbose and current_size > 1024:
@@ -140,6 +146,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
     current_pd = 0
     current_swap = 0
     current_swap_pss = 0
+    current_anon = 0
+    current_ahp = 0
     current_permissions = ""
     
     # Compile the regex pattern safely
@@ -166,6 +174,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                 current_pd,
                 current_swap,
                 current_swap_pss,
+                current_anon,
+                current_ahp,
                 verbose,
             )
             
@@ -181,6 +191,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
             current_pd = 0
             current_swap = 0
             current_swap_pss = 0
+            current_anon = 0
+            current_ahp = 0
             # Store full permissions string
             current_permissions = parts[1] if len(parts) > 1 else ""
         elif line.startswith('Size:'):
@@ -246,6 +258,20 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
                     current_swap_pss = max(0, int(parts[1]))
                 except ValueError:
                     current_swap_pss = 0
+        elif line.startswith('Anonymous:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_anon = max(0, int(parts[1]))
+                except ValueError:
+                    current_anon = 0
+        elif line.startswith('AnonHugePages:'):
+            parts = line.split()
+            if len(parts) > 1:
+                try:
+                    current_ahp = max(0, int(parts[1]))
+                except ValueError:
+                    current_ahp = 0
     
     _flush_entry(
         file_stats,
@@ -261,6 +287,8 @@ def parse_smaps(smaps_content: str, pattern: str = ".*", verbose: bool = False) 
         current_pd,
         current_swap,
         current_swap_pss,
+        current_anon,
+        current_ahp,
         verbose,
     )
     
@@ -350,7 +378,10 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
         agg: Dict[str, Dict[str, int]] = {}
         for (_, perms), stats in file_stats.items():
             if perms not in agg:
-                agg[perms] = {"size": 0, "rss": 0, "pss": 0, "shared": 0, "private": 0, "swap": 0, "swap_pss": 0}
+                agg[perms] = {
+                    "size": 0, "rss": 0, "pss": 0, "shared": 0, "private": 0,
+                    "swap": 0, "swap_pss": 0, "anonymous": 0, "anon_huge_pages": 0,
+                }
             agg[perms]["size"] += stats.size
             agg[perms]["rss"] += stats.rss
             agg[perms]["pss"] += stats.pss
@@ -358,6 +389,8 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
             agg[perms]["private"] += stats.private
             agg[perms]["swap"] += stats.swap
             agg[perms]["swap_pss"] += stats.swap_pss
+            agg[perms]["anonymous"] += stats.anonymous
+            agg[perms]["anon_huge_pages"] += stats.anon_huge_pages
 
         summary = {}
         for perms, totals in agg.items():
@@ -368,6 +401,8 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
             private = totals["private"]
             swap = totals["swap"]
             swap_pss = totals["swap_pss"]
+            anon = totals["anonymous"]
+            ahp = totals["anon_huge_pages"]
             summary[perms] = {
                 "size_kb": sz,
                 "rss_kb": rss,
@@ -376,6 +411,8 @@ def summarize_smaps(pid: int, pattern: str = ".*", verbose: bool = False, smaps_
                 "private_kb": private,
                 "swap_kb": swap,
                 "swap_pss_kb": swap_pss,
+                "anonymous_kb": anon,
+                "anon_huge_pages_kb": ahp,
                 "cache_pct": (rss / sz * 100.0) if sz > 0 else 0.0,
                 "pss_pct": (pss / sz * 100.0) if sz > 0 else 0.0,
             }
@@ -395,6 +432,8 @@ def calculate_summary_totals(summary: Dict[str, dict]) -> dict:
             "total_private_kb": 0,
             "total_swap_kb": 0,
             "total_swap_pss_kb": 0,
+            "total_anonymous_kb": 0,
+            "total_anon_huge_pages_kb": 0,
             "overall_cache_pct": 0.0,
         }
     tot_sz = sum(d.get("size_kb", 0) for d in summary.values())
@@ -404,6 +443,8 @@ def calculate_summary_totals(summary: Dict[str, dict]) -> dict:
     tot_private = sum(d.get("private_kb", 0) for d in summary.values())
     tot_swap = sum(d.get("swap_kb", 0) for d in summary.values())
     tot_swap_pss = sum(d.get("swap_pss_kb", 0) for d in summary.values())
+    tot_anon = sum(d.get("anonymous_kb", 0) for d in summary.values())
+    tot_ahp = sum(d.get("anon_huge_pages_kb", 0) for d in summary.values())
     cache_pct = (tot_rss / tot_sz * 100.0) if tot_sz > 0 else 0.0
 
     return {
@@ -414,8 +455,32 @@ def calculate_summary_totals(summary: Dict[str, dict]) -> dict:
         "total_private_kb": tot_private,
         "total_swap_kb": tot_swap,
         "total_swap_pss_kb": tot_swap_pss,
+        "total_anonymous_kb": tot_anon,
+        "total_anon_huge_pages_kb": tot_ahp,
         "overall_cache_pct": round(cache_pct, 2),
     }
+
+
+def filter_mappings_by_min_rss(file_stats: Dict[Tuple[str, str], MapStats], min_rss_kb: int = 1024) -> Dict[Tuple[str, str], MapStats]:
+    """Filter memory mappings by minimum RSS threshold."""
+    if not isinstance(file_stats, dict):
+        return {}
+    if not isinstance(min_rss_kb, int) or isinstance(min_rss_kb, bool) or min_rss_kb < 0:
+        min_rss_kb = 0
+    return {k: v for k, v in file_stats.items() if isinstance(v, MapStats) and v.rss >= min_rss_kb}
+
+
+def export_json_summary(summary: Dict[str, dict]) -> str:
+    """Export structured JSON string containing segment metrics and summary totals."""
+    import json
+    if not isinstance(summary, dict):
+        summary = {}
+    totals = calculate_summary_totals(summary)
+    payload = {
+        "segments": summary,
+        "totals": totals,
+    }
+    return json.dumps(payload, indent=2)
 
 
 def format_memory_summary(summary: Dict[str, dict]) -> str:
