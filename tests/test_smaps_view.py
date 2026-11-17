@@ -12,6 +12,8 @@ calculate_cache_percentage = smaps_view.calculate_cache_percentage
 summarize_smaps = smaps_view.summarize_smaps
 format_memory_summary = smaps_view.format_memory_summary
 calculate_summary_totals = smaps_view.calculate_summary_totals
+filter_mappings_by_min_rss = smaps_view.filter_mappings_by_min_rss
+export_json_summary = smaps_view.export_json_summary
 
 
 SAMPLE_SMAPS = """7de883800000-7de885800000 r--s 00000000 00:33 26610006                   /qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap
@@ -183,4 +185,40 @@ SwapPss:            128 kB
     empty_totals = calculate_summary_totals({})
     assert empty_totals["total_size_kb"] == 0
     assert empty_totals["overall_cache_pct"] == 0.0
+
+
+def test_parse_smaps_anonymous_and_json_export():
+    anon_smaps = """7de883800000-7de885800000 rw-p 00000000 00:33 26610006   /var/lib/heap.bin
+Size:              8192 kB
+Rss:               4096 kB
+Pss:               4096 kB
+Anonymous:         2048 kB
+AnonHugePages:     1024 kB
+"""
+    stats = parse_smaps(anon_smaps, r".*")
+    key = ("/var/lib/heap.bin", "rw-p")
+    assert key in stats
+    assert stats[key].anonymous == 2048
+    assert stats[key].anon_huge_pages == 1024
+
+    # Test filtering by min RSS
+    filtered = filter_mappings_by_min_rss(stats, min_rss_kb=4000)
+    assert len(filtered) == 1
+    assert filter_mappings_by_min_rss(stats, min_rss_kb=5000) == {}
+    assert filter_mappings_by_min_rss({}) == {}
+
+    summary = summarize_smaps(1, r".*", smaps_content=anon_smaps)
+    assert summary["rw-p"]["anonymous_kb"] == 2048
+    assert summary["rw-p"]["anon_huge_pages_kb"] == 1024
+
+    totals = calculate_summary_totals(summary)
+    assert totals["total_anonymous_kb"] == 2048
+    assert totals["total_anon_huge_pages_kb"] == 1024
+
+    # Test export JSON
+    json_str = export_json_summary(summary)
+    assert '"rw-p"' in json_str
+    assert '"total_anonymous_kb": 2048' in json_str
+    assert '"total_anon_huge_pages_kb": 1024' in json_str
+
 
