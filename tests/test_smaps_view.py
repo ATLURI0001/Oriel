@@ -14,6 +14,10 @@ format_memory_summary = smaps_view.format_memory_summary
 calculate_summary_totals = smaps_view.calculate_summary_totals
 filter_mappings_by_min_rss = smaps_view.filter_mappings_by_min_rss
 export_json_summary = smaps_view.export_json_summary
+MapStats = smaps_view.MapStats
+diff_smaps_snapshots = smaps_view.diff_smaps_snapshots
+detect_memory_regressions = smaps_view.detect_memory_regressions
+compute_memory_pressure_profile = smaps_view.compute_memory_pressure_profile
 
 
 SAMPLE_SMAPS = """7de883800000-7de885800000 r--s 00000000 00:33 26610006                   /qdrant/storage/collections/benchmark/0/segments/chunk_1.mmap
@@ -220,5 +224,77 @@ AnonHugePages:     1024 kB
     assert '"rw-p"' in json_str
     assert '"total_anonymous_kb": 2048' in json_str
     assert '"total_anon_huge_pages_kb": 1024' in json_str
+
+
+def test_diff_smaps_snapshots_tracks_added_removed_and_deltas():
+    before = {
+        ("/qdrant/seg0.mmap", "rw-s"): MapStats(size=8192, rss=2048, pss=2048, private_dirty=512, anonymous=0, swap=0),
+        ("/qdrant/old.mmap", "r--s"): MapStats(size=4096, rss=1024, pss=1024),
+    }
+    after = {
+        ("/qdrant/seg0.mmap", "rw-s"): MapStats(size=8192, rss=4096, pss=4096, private_dirty=1536, anonymous=0, swap=128),
+        ("/qdrant/new.mmap", "rw-p"): MapStats(size=4096, rss=2048, pss=2048, anonymous=2048),
+    }
+    diff = diff_smaps_snapshots(before, after)
+    assert diff["totals_delta"]["rss_delta_kb"] == 3072
+    assert diff["totals_delta"]["private_dirty_delta_kb"] == 1024
+    assert diff["totals_delta"]["anonymous_delta_kb"] == 2048
+    assert diff["totals_delta"]["swap_delta_kb"] == 128
+    assert len(diff["added"]) == 1 and diff["added"][0]["path"] == "/qdrant/new.mmap"
+    assert len(diff["removed"]) == 1 and diff["removed"][0]["path"] == "/qdrant/old.mmap"
+    assert len(diff["changed"]) == 1 and diff["changed"][0]["rss_delta_kb"] == 2048
+
+
+def test_detect_memory_regressions_identifies_monotonic_leaks_and_ignores_transient_spikes():
+    # Sustained monotonic leak in [heap]
+    # Transient spike-and-drop in /tmp/cache.bin (must NOT be flagged)
+    snaps = [
+        {
+            ("[heap]", "rw-p"): MapStats(private_dirty=1000, anonymous=1000),
+            ("/tmp/cache.bin", "rw-p"): MapStats(private_dirty=1000),
+        },
+        {
+            ("[heap]", "rw-p"): MapStats(private_dirty=2200, anonymous=2200),
+            ("/tmp/cache.bin", "rw-p"): MapStats(private_dirty=6000),
+        },
+        {
+            ("[heap]", "rw-p"): MapStats(private_dirty=3500, anonymous=3500),
+            ("/tmp/cache.bin", "rw-p"): MapStats(private_dirty=1200),
+        },
+        {
+            ("[heap]", "rw-p"): MapStats(private_dirty=5000, anonymous=5000),
+            ("/tmp/cache.bin", "rw-p"): MapStats(private_dirty=1100),
+        },
+    ]
+    suspects = detect_memory_regressions(snaps, min_growth_kb=2048, monotonic_ratio=0.75)
+    assert len(suspects) == 1
+    assert suspects[0]["path"] == "[heap]"
+    assert suspects[0]["growth_kb"] == 4000
+    assert suspects[0]["monotonicity"] == 1.0
+    assert suspects[0]["slope_kb_per_sample"] > 1000.0
+    assert detect_memory_regressions([snaps[0]]) == []
+
+
+def test_compute_memory_pressure_profile():
+    stats = {
+        ("/qdrant/vec.mmap", "rw-s"): MapStats(
+            size=10000,
+            rss=5000,
+            pss=2500,
+            private_dirty=1000,
+            shared_dirty=500,
+            swap=1000,
+            anonymous=2000,
+            anon_huge_pages=1000,
+        )
+    }
+    profile = compute_memory_pressure_profile(stats)
+    assert profile["page_cache_residency_pct"] == 50.0
+    assert profile["dirty_ratio_pct"] == 30.0
+    assert profile["swap_pressure_pct"] == 16.67
+    assert profile["thp_coverage_pct"] == 50.0
+    assert profile["shared_efficiency_pct"] == 50.0
+    assert compute_memory_pressure_profile({})["page_cache_residency_pct"] == 0.0
+
 
 
