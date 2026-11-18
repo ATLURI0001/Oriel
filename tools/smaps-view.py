@@ -500,6 +500,173 @@ def format_memory_summary(summary: Dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def diff_smaps_snapshots(
+    before: Dict[Tuple[str, str], MapStats],
+    after: Dict[Tuple[str, str], MapStats],
+) -> dict:
+    """Compute exact per-mapping and aggregate memory deltas between two smaps snapshots."""
+    if not isinstance(before, dict):
+        before = {}
+    if not isinstance(after, dict):
+        after = {}
+
+    all_keys = set(before.keys()) | set(after.keys())
+    added = []
+    removed = []
+    changed = []
+
+    tot_rss = tot_pss = tot_pd = tot_anon = tot_swap = 0
+
+    for key in sorted(all_keys):
+        b = before.get(key)
+        a = after.get(key)
+        b_stats = b if isinstance(b, MapStats) else MapStats()
+        a_stats = a if isinstance(a, MapStats) else MapStats()
+
+        d_rss = a_stats.rss - b_stats.rss
+        d_pss = a_stats.pss - b_stats.pss
+        d_pd = a_stats.private_dirty - b_stats.private_dirty
+        d_anon = a_stats.anonymous - b_stats.anonymous
+        d_swap = a_stats.swap - b_stats.swap
+
+        tot_rss += d_rss
+        tot_pss += d_pss
+        tot_pd += d_pd
+        tot_anon += d_anon
+        tot_swap += d_swap
+
+        entry = {
+            "path": key[0],
+            "perms": key[1],
+            "rss_delta_kb": d_rss,
+            "pss_delta_kb": d_pss,
+            "private_dirty_delta_kb": d_pd,
+            "anonymous_delta_kb": d_anon,
+            "swap_delta_kb": d_swap,
+        }
+        if key not in before:
+            added.append(entry)
+        elif key not in after:
+            removed.append(entry)
+        elif any(v != 0 for v in (d_rss, d_pss, d_pd, d_anon, d_swap)):
+            changed.append(entry)
+
+    changed.sort(key=lambda item: abs(item["rss_delta_kb"]), reverse=True)
+    added.sort(key=lambda item: item["rss_delta_kb"], reverse=True)
+    removed.sort(key=lambda item: item["rss_delta_kb"])
+
+    return {
+        "totals_delta": {
+            "rss_delta_kb": tot_rss,
+            "pss_delta_kb": tot_pss,
+            "private_dirty_delta_kb": tot_pd,
+            "anonymous_delta_kb": tot_anon,
+            "swap_delta_kb": tot_swap,
+        },
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    }
+
+
+def detect_memory_regressions(
+    snapshots: List[Dict[Tuple[str, str], MapStats]],
+    min_growth_kb: int = 1024,
+    monotonic_ratio: float = 0.75,
+) -> List[dict]:
+    """Identify sustained memory-leak suspects across a chronological series of smaps snapshots.
+
+    Uses ordinary least-squares slope and monotonic growth ratio over (private_dirty + anonymous)
+    memory footprint per (path, perms) mapping.
+    """
+    if not isinstance(snapshots, list) or len(snapshots) < 2:
+        return []
+    if not isinstance(min_growth_kb, int) or isinstance(min_growth_kb, bool) or min_growth_kb < 0:
+        min_growth_kb = 1024
+    monotonic_ratio = max(0.0, min(1.0, float(monotonic_ratio)))
+
+    all_keys: set[Tuple[str, str]] = set()
+    for snap in snapshots:
+        if isinstance(snap, dict):
+            all_keys.update(snap.keys())
+
+    n = len(snapshots)
+    x_mean = (n - 1) / 2.0
+    x_var = sum((i - x_mean) ** 2 for i in range(n))
+    suspects: List[dict] = []
+
+    for key in sorted(all_keys):
+        series: List[int] = []
+        for snap in snapshots:
+            st = snap.get(key) if isinstance(snap, dict) else None
+            if isinstance(st, MapStats):
+                series.append(max(st.private_dirty, st.anonymous))
+            else:
+                series.append(0)
+
+        growth = series[-1] - series[0]
+        if growth < min_growth_kb:
+            continue
+
+        non_decreasing = sum(1 for i in range(1, n) if series[i] >= series[i - 1])
+        mono = non_decreasing / (n - 1)
+        if mono < monotonic_ratio:
+            continue
+
+        y_mean = sum(series) / n
+        cov = sum((i - x_mean) * (series[i] - y_mean) for i in range(n))
+        slope = cov / x_var if x_var > 0 else 0.0
+        if slope <= 0.0:
+            continue
+
+        suspects.append(
+            {
+                "path": key[0],
+                "perms": key[1],
+                "initial_kb": series[0],
+                "final_kb": series[-1],
+                "growth_kb": growth,
+                "slope_kb_per_sample": round(slope, 2),
+                "monotonicity": round(mono, 3),
+            }
+        )
+
+    suspects.sort(key=lambda item: item["growth_kb"], reverse=True)
+    return suspects
+
+
+def compute_memory_pressure_profile(file_stats: Dict[Tuple[str, str], MapStats]) -> dict:
+    """Compute kernel page-cache, dirty-page, swap, THP, and shared-memory efficiency ratios."""
+    if not isinstance(file_stats, dict) or not file_stats:
+        return {
+            "page_cache_residency_pct": 0.0,
+            "dirty_ratio_pct": 0.0,
+            "swap_pressure_pct": 0.0,
+            "thp_coverage_pct": 0.0,
+            "shared_efficiency_pct": 0.0,
+        }
+
+    size = rss = pss = dirty = swap = anon = ahp = 0
+    for st in file_stats.values():
+        if not isinstance(st, MapStats):
+            continue
+        size += st.size
+        rss += st.rss
+        pss += st.pss
+        dirty += st.private_dirty + st.shared_dirty
+        swap += st.swap
+        anon += st.anonymous
+        ahp += st.anon_huge_pages
+
+    return {
+        "page_cache_residency_pct": round((rss / size) * 100.0, 2) if size > 0 else 0.0,
+        "dirty_ratio_pct": round((dirty / rss) * 100.0, 2) if rss > 0 else 0.0,
+        "swap_pressure_pct": round((swap / (rss + swap)) * 100.0, 2) if (rss + swap) > 0 else 0.0,
+        "thp_coverage_pct": round((ahp / anon) * 100.0, 2) if anon > 0 else 0.0,
+        "shared_efficiency_pct": round(((rss - pss) / rss) * 100.0, 2) if rss > 0 and rss >= pss else 0.0,
+    }
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Analyze memory maps and calculate cache percentages')
     parser.add_argument('pid', type=int, help='Process ID to analyze')
